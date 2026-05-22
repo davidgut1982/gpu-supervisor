@@ -1,0 +1,47 @@
+services:
+  gpu-supervisor:
+    build: .
+    image: gpu-supervisor:latest
+    container_name: gpu-supervisor
+
+    # CPU-only service: the supervisor never touches the GPU directly.
+    cpus: 2.0
+
+    # Memory: in-memory registry + httpx pools fits comfortably in 512 MB.
+    mem_limit: 512m
+
+    ports:
+      - "8202:8202"
+
+    environment:
+      # REQUIRED: set this to your GPU's usable VRAM in GB (e.g. RTX 3060 ~ 11.6).
+      # The supervisor will refuse to start if this is unset or <= 0.
+      TOTAL_VRAM_GB: "${TOTAL_VRAM_GB:?Set TOTAL_VRAM_GB in your environment or .env file}"
+      LOG_LEVEL: "INFO"
+      # Optional: enable API key auth by setting a non-empty value.
+      # API_KEY: "your-secret-key"
+      # Tier keep-alives can be overridden per-deployment:
+      # TIER2_KEEP_ALIVE_SECONDS: "1800"
+      # TIER3_KEEP_ALIVE_SECONDS: "300"
+
+    networks:
+      - supervisor_network
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8202/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    restart: unless-stopped
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  supervisor_network:
+    driver: bridge
