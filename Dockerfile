@@ -40,8 +40,4 @@ EXPOSE 8202
 # --workers 1: the in-memory registry uses asyncio.Lock for safety within a
 # single process. Multiple workers would have separate registry instances and
 # incorrect VRAM accounting. Use 1 worker + async concurrency instead.
-CMD ["uvicorn", "main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8202", \
-     "--workers", "1", \
-     "--log-level", "info"]
+CMD ["python", "main.py"]

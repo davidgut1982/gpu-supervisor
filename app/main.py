@@ -222,7 +222,7 @@ app = FastAPI(
 # explorer remain reachable without credentials).
 # Test: Set API_KEY=secret, GET /status without header → 401; with correct
 # header → 200. Unset API_KEY, GET /status without header → 200.
-_AUTH_EXEMPT_PATHS = frozenset({"/health", "/docs", "/openapi.json"})
+_AUTH_EXEMPT_PATHS = frozenset({"/health", "/docs", "/redoc", "/openapi.json"})
 
 
 @app.middleware("http")
@@ -392,7 +392,7 @@ async def claim(service_name: str) -> ClaimResponse:
     # When a Tier 3 service tries to claim while any Tier 1 or Tier 2 service
     # has refcount > 0, reject with 503 rather than evicting or loading.
     # This prevents thrashing when the user is actively using interactive
-    # services (e.g. omnivoice-lv during TTS, fluency-gate during exercises).
+    # services (e.g. tts-service during synthesis, asr-service during transcription).
     if entry.priority_tier == 3:
         higher_priority_active = [
             e for e in (await registry.get_all())
