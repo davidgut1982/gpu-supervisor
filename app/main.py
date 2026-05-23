@@ -17,20 +17,21 @@ Design notes:
 
 Internal port: 8202 (configurable via PORT env var)
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import sys
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional
-
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from datetime import UTC, datetime
+from typing import Optional
 
 from config import settings
 from eviction import NotEnoughVRAMError, evict_for_vram
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from lifecycle_client import LifecycleClient, LifecycleError
 from models import (
     ClaimResponse,
@@ -66,7 +67,7 @@ _load_lock: asyncio.Lock = asyncio.Lock()
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # ── Background keep-alive expiry task ─────────────────────────────────────────
@@ -376,8 +377,7 @@ async def claim(service_name: str) -> ClaimResponse:
     if entry is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Service not registered: {service_name!r}. "
-                   f"Call POST /register first.",
+            detail=f"Service not registered: {service_name!r}. " f"Call POST /register first.",
         )
 
     # Increment refcount before load attempt so that concurrent claims for the
@@ -385,6 +385,7 @@ async def claim(service_name: str) -> ClaimResponse:
     await registry.increment_refcount(service_name)
 
     import time
+
     t0 = time.monotonic()
     evicted: list[str] = []
 
@@ -395,7 +396,8 @@ async def claim(service_name: str) -> ClaimResponse:
     # services (e.g. tts-service during synthesis, asr-service during transcription).
     if entry.priority_tier == 3:
         higher_priority_active = [
-            e for e in (await registry.get_all())
+            e
+            for e in (await registry.get_all())
             if e.priority_tier < 3 and e.reference_count > 0 and e.service_name != service_name
         ]
         if higher_priority_active:
@@ -404,7 +406,8 @@ async def claim(service_name: str) -> ClaimResponse:
             names = [e.service_name for e in higher_priority_active]
             log.info(
                 "claim deferred: %s (Tier 3) yielded to active higher-priority services: %s",
-                service_name, names
+                service_name,
+                names,
             )
             raise HTTPException(
                 status_code=503,
@@ -427,14 +430,16 @@ async def claim(service_name: str) -> ClaimResponse:
     if entry.priority_tier == 1:
         all_services = await registry.get_all()
         idle_tier2 = [
-            s for s in all_services
+            s
+            for s in all_services
             if s.priority_tier == 2
             and s.state == "loaded"
             and s.reference_count == 0
             and s.service_name != service_name
         ]
         busy_tier2 = [
-            s for s in all_services
+            s
+            for s in all_services
             if s.priority_tier == 2
             and s.state == "loaded"
             and s.reference_count > 0
@@ -544,7 +549,7 @@ async def claim(service_name: str) -> ClaimResponse:
                         f"needed {exc.needed:.2f} GB but only freed {exc.freed:.2f} GB. "
                         f"Exhausted {exc.candidates_exhausted} eviction candidate(s)."
                     ),
-                )
+                ) from None
 
         # Load the service
         await registry.set_state(service_name, "loading")
@@ -562,7 +567,7 @@ async def claim(service_name: str) -> ClaimResponse:
             raise HTTPException(
                 status_code=502,
                 detail=f"Failed to load {service_name!r}: {exc}",
-            )
+            ) from None
 
     waited = time.monotonic() - t0
     status_str = "evicted_to_load" if evicted else "loaded"
@@ -642,9 +647,7 @@ async def status() -> SupervisorStatus:
     registry = _require_registry()
 
     entries = await registry.get_all()
-    used_gb = sum(
-        e.vram_gb_declared for e in entries if e.state in ("loaded", "loading")
-    )
+    used_gb = sum(e.vram_gb_declared for e in entries if e.state in ("loaded", "loading"))
 
     services = [
         ServiceStatus(
@@ -725,4 +728,5 @@ async def health() -> JSONResponse:
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=settings.port)

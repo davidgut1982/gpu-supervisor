@@ -11,19 +11,20 @@ contention is expected to be extremely low — load/unload operations are rare
 relative to read operations, and serialising them is desirable to avoid
 double-load races.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Dict, Optional
+from datetime import UTC, datetime
+from typing import Optional
 
 log = logging.getLogger("gpu-supervisor")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 @dataclass
@@ -70,7 +71,7 @@ class ServiceRegistry:
     """Thread-safe in-memory registry of GPU services."""
 
     def __init__(self) -> None:
-        self._services: Dict[str, ServiceEntry] = {}
+        self._services: dict[str, ServiceEntry] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
 
     # ── Mutation helpers (must be called while holding the lock) ──────────────
@@ -214,10 +215,7 @@ class ServiceRegistry:
           2. Within tier: oldest last_used first (LRU)
         """
         async with self._lock:
-            candidates = [
-                e for e in self._services.values()
-                if e.is_evictable()
-            ]
+            candidates = [e for e in self._services.values() if e.is_evictable()]
         # Sort: highest tier first (3 > 2 > 1), then oldest last_used first
         candidates.sort(key=lambda e: (-e.priority_tier, e.last_used))
         return candidates
@@ -226,10 +224,7 @@ class ServiceRegistry:
         """Return services whose keep-alive has elapsed and should be unloaded."""
         now = _utcnow()
         async with self._lock:
-            return [
-                e for e in self._services.values()
-                if e.is_idle_expired(now)
-            ]
+            return [e for e in self._services.values() if e.is_idle_expired(now)]
 
     async def touch(self, service_name: str) -> None:
         """Update last_used timestamp without changing refcount."""

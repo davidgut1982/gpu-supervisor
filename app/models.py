@@ -1,13 +1,13 @@
 """
 gpu-supervisor — Pydantic v2 request/response models.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
-
 
 # ── Registration ──────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ class ClaimResponse(BaseModel):
     status: str  # "loaded" | "loading" | "evicted_to_load" | "failed"
     waited_seconds: float
     reference_count: int
-    evicted: List[str]
+    evicted: list[str]
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ class ServiceStatus(BaseModel):
 
 
 class SupervisorStatus(BaseModel):
-    services: List[ServiceStatus]
+    services: list[ServiceStatus]
     total_vram_gb: float
     used_vram_gb: float
     available_vram_gb: float

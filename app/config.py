@@ -7,6 +7,7 @@ without code changes.
 What: Pydantic Settings model parsed from environment / .env file.
 Test: Set TOTAL_VRAM_GB=12, import settings, assert settings.total_vram_gb == 12.
 """
+
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict

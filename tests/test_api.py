@@ -3,9 +3,11 @@ API integration tests using FastAPI TestClient + mocked lifecycle_client.
 
 Tests exercise the HTTP API surface without making real service calls.
 """
+
 from __future__ import annotations
 
 import sys
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,11 +30,13 @@ def make_mock_client(
         client.load = AsyncMock(return_value={"status": "loaded", "vram_gb_actual": 1.0})
     else:
         from lifecycle_client import LifecycleError
+
         client.load = AsyncMock(side_effect=LifecycleError("mock load failure"))
     if unload_success:
         client.unload = AsyncMock(return_value={"status": "unloaded"})
     else:
         from lifecycle_client import LifecycleError
+
         client.unload = AsyncMock(side_effect=LifecycleError("mock unload failure"))
     return client
 
@@ -55,6 +59,7 @@ def client_with_mocks():
 
     with patch("lifecycle_client.LifecycleClient", return_value=mock_lc):
         import main as app_main
+
         app_main._client = mock_lc
 
         with TestClient(app_main.app) as tc:
@@ -73,12 +78,15 @@ def register_service(
     tier: int = 2,
 ) -> dict:
     """Helper: register a service via the API."""
-    resp = tc.post("/register", json={
-        "service_name": name,
-        "base_url": base_url,
-        "vram_gb_declared": vram_gb,
-        "priority_tier": tier,
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": name,
+            "base_url": base_url,
+            "vram_gb_declared": vram_gb,
+            "priority_tier": tier,
+        },
+    )
     assert resp.status_code == 200, f"Register failed: {resp.text}"
     return resp.json()
 
@@ -109,46 +117,58 @@ def test_register_new_service(client_with_mocks):
 def test_register_second_time_returns_updated(client_with_mocks):
     tc, _ = client_with_mocks
     register_service(tc, name="svc-a", vram_gb=2.0)
-    resp = tc.post("/register", json={
-        "service_name": "svc-a",
-        "base_url": "http://svc-a:8000",
-        "vram_gb_declared": 3.0,
-        "priority_tier": 2,
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": "svc-a",
+            "base_url": "http://svc-a:8000",
+            "vram_gb_declared": 3.0,
+            "priority_tier": 2,
+        },
+    )
     assert resp.status_code == 200
     assert resp.json()["status"] == "already_registered_updated"
 
 
 def test_register_invalid_tier_422(client_with_mocks):
     tc, _ = client_with_mocks
-    resp = tc.post("/register", json={
-        "service_name": "svc-x",
-        "base_url": "http://svc-x:8000",
-        "vram_gb_declared": 1.0,
-        "priority_tier": 99,  # invalid
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": "svc-x",
+            "base_url": "http://svc-x:8000",
+            "vram_gb_declared": 1.0,
+            "priority_tier": 99,  # invalid
+        },
+    )
     assert resp.status_code == 422
 
 
 def test_register_zero_vram_422(client_with_mocks):
     tc, _ = client_with_mocks
-    resp = tc.post("/register", json={
-        "service_name": "svc-x",
-        "base_url": "http://svc-x:8000",
-        "vram_gb_declared": 0.0,  # invalid
-        "priority_tier": 2,
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": "svc-x",
+            "base_url": "http://svc-x:8000",
+            "vram_gb_declared": 0.0,  # invalid
+            "priority_tier": 2,
+        },
+    )
     assert resp.status_code == 422
 
 
 def test_register_vram_exceeds_total_422(client_with_mocks):
     tc, _ = client_with_mocks
-    resp = tc.post("/register", json={
-        "service_name": "svc-huge",
-        "base_url": "http://svc-huge:8000",
-        "vram_gb_declared": 100.0,  # exceeds 11.6 GB total
-        "priority_tier": 2,
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": "svc-huge",
+            "base_url": "http://svc-huge:8000",
+            "vram_gb_declared": 100.0,  # exceeds 11.6 GB total
+            "priority_tier": 2,
+        },
+    )
     assert resp.status_code == 422
 
 
@@ -159,13 +179,16 @@ def test_register_tier1_with_keep_alive_override_422(client_with_mocks):
     which before the fix would silently allow the service to be expired.
     """
     tc, _ = client_with_mocks
-    resp = tc.post("/register", json={
-        "service_name": "tier1-svc",
-        "base_url": "http://tier1-svc:8000",
-        "vram_gb_declared": 2.0,
-        "priority_tier": 1,
-        "keep_alive_seconds": 300,  # must be rejected for Tier 1
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": "tier1-svc",
+            "base_url": "http://tier1-svc:8000",
+            "vram_gb_declared": 2.0,
+            "priority_tier": 1,
+            "keep_alive_seconds": 300,  # must be rejected for Tier 1
+        },
+    )
     assert resp.status_code == 422
     detail = resp.json()["detail"]
     assert "Tier 1" in detail, f"Error message should mention 'Tier 1', got: {detail!r}"
@@ -174,13 +197,16 @@ def test_register_tier1_with_keep_alive_override_422(client_with_mocks):
 def test_register_tier1_without_keep_alive_override_succeeds(client_with_mocks):
     """Tier 1 registration without keep_alive_seconds override must succeed."""
     tc, _ = client_with_mocks
-    resp = tc.post("/register", json={
-        "service_name": "tier1-no-override",
-        "base_url": "http://tier1-no-override:8000",
-        "vram_gb_declared": 2.0,
-        "priority_tier": 1,
-        # No keep_alive_seconds — should use tier default
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": "tier1-no-override",
+            "base_url": "http://tier1-no-override:8000",
+            "vram_gb_declared": 2.0,
+            "priority_tier": 1,
+            # No keep_alive_seconds — should use tier default
+        },
+    )
     assert resp.status_code == 200
 
 
@@ -247,6 +273,7 @@ def test_claim_load_failure_returns_502(client_with_mocks):
     tc, mock_lc = client_with_mocks
 
     from lifecycle_client import LifecycleError
+
     mock_lc.status = AsyncMock(return_value="unloaded")
     mock_lc.load = AsyncMock(side_effect=LifecycleError("GPU OOM"))
 
@@ -367,9 +394,9 @@ def test_tier1_service_never_idle_expired(client_with_mocks):
     # Access the registry model directly to set a past last_used timestamp.
     app_dir = Path(__file__).parent.parent / "app"
     sys.path.insert(0, str(app_dir))
-    from registry import ServiceEntry
+    from datetime import datetime, timedelta
 
-    from datetime import datetime, timezone, timedelta
+    from registry import ServiceEntry
 
     # Construct a Tier 1 service entry whose last_used is 1 hour ago
     entry = ServiceEntry(
@@ -380,12 +407,12 @@ def test_tier1_service_never_idle_expired(client_with_mocks):
         keep_alive_seconds=60,  # would normally expire after 60 s
         state="loaded",
         reference_count=0,
-        last_used=datetime.now(tz=timezone.utc) - timedelta(hours=1),
+        last_used=datetime.now(tz=UTC) - timedelta(hours=1),
     )
 
     # Tier 1 must never report as idle-expired regardless of keep_alive_seconds
     # or how long ago last_used was.
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     assert not entry.is_idle_expired(now), (
         "Tier 1 service reported as idle_expired — this would allow auto-eviction "
         "of fluency-gate-roberta-lv mid-session (Policy A violation)"
@@ -393,9 +420,9 @@ def test_tier1_service_never_idle_expired(client_with_mocks):
 
     # Sanity: same entry at Tier 2 WOULD be expired
     entry.priority_tier = 2
-    assert entry.is_idle_expired(now), (
-        "Tier 2 service with elapsed keep_alive should be idle_expired"
-    )
+    assert entry.is_idle_expired(
+        now
+    ), "Tier 2 service with elapsed keep_alive should be idle_expired"
 
 
 # ── Policy B: Tier 3 yield tests ─────────────────────────────────────────────
@@ -423,9 +450,9 @@ def test_tier3_claim_yields_to_active_tier2(client_with_mocks):
 
     # Claim Tier 3 — must yield with 503
     response = tc.post("/claim/vocal-isolator-lv")
-    assert response.status_code == 503, (
-        f"Expected 503 (tier3_yield), got {response.status_code}: {response.text}"
-    )
+    assert (
+        response.status_code == 503
+    ), f"Expected 503 (tier3_yield), got {response.status_code}: {response.text}"
     body = response.json()["detail"]
     assert body["reason"] == "tier3_yield", f"Expected reason=tier3_yield, got: {body}"
     assert "omnivoice-lv" in body["active_higher_priority"]
@@ -434,9 +461,9 @@ def test_tier3_claim_yields_to_active_tier2(client_with_mocks):
     # Verify refcount on vocal-isolator was NOT incremented (yield cleaned up)
     status = tc.get("/status")
     svcs = {s["service_name"]: s for s in status.json()["services"]}
-    assert svcs["vocal-isolator-lv"]["reference_count"] == 0, (
-        "Tier 3 yield must not leave a stale refcount on vocal-isolator-lv"
-    )
+    assert (
+        svcs["vocal-isolator-lv"]["reference_count"] == 0
+    ), "Tier 3 yield must not leave a stale refcount on vocal-isolator-lv"
 
     # Load must NOT have been called (no eviction/loading for a yielded claim)
     mock_lc.load.assert_not_called()
@@ -458,9 +485,9 @@ def test_tier3_claim_proceeds_when_no_active_higher_priority(client_with_mocks):
     register_service(tc, name="vocal-isolator-lv", vram_gb=3.0, tier=3)
 
     response = tc.post("/claim/vocal-isolator-lv")
-    assert response.status_code == 200, (
-        f"Tier 3 should succeed when no higher-priority service is active: {response.text}"
-    )
+    assert (
+        response.status_code == 200
+    ), f"Tier 3 should succeed when no higher-priority service is active: {response.text}"
     assert response.json()["reference_count"] >= 1
 
 

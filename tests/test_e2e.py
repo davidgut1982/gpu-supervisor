@@ -14,6 +14,7 @@ Design:
   - app/ is always inserted BEFORE mock_service/ in sys.path to ensure the
     supervisor's main.py wins the 'main' module slot.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -53,6 +54,7 @@ def _reload_supervisor():
     for mod in _SUPERVISOR_MODULES:
         sys.modules.pop(mod, None)
     import main as supervisor_main  # noqa: PLC0415
+
     return supervisor_main
 
 
@@ -65,9 +67,7 @@ def _load_mock_service_module(unique_suffix: str) -> object:
     unique_name = f"_mock_svc_{unique_suffix}"
     sys.modules.pop(unique_name, None)
 
-    spec = importlib.util.spec_from_file_location(
-        unique_name, MOCK_SERVICE_DIR / "main.py"
-    )
+    spec = importlib.util.spec_from_file_location(unique_name, MOCK_SERVICE_DIR / "main.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -238,25 +238,19 @@ async def test_register_claim_release_workflow():
     sup_mod = _reload_supervisor()
 
     async def _load(svc_name, base_url):
-        async with httpx.AsyncClient(
-            transport=mock_transport, base_url="http://mock"
-        ) as c:
+        async with httpx.AsyncClient(transport=mock_transport, base_url="http://mock") as c:
             resp = await c.post("/lifecycle/load")
             resp.raise_for_status()
             return resp.json()
 
     async def _unload(svc_name, base_url):
-        async with httpx.AsyncClient(
-            transport=mock_transport, base_url="http://mock"
-        ) as c:
+        async with httpx.AsyncClient(transport=mock_transport, base_url="http://mock") as c:
             resp = await c.post("/lifecycle/unload")
             resp.raise_for_status()
             return resp.json()
 
     async def _status(svc_name, base_url):
-        async with httpx.AsyncClient(
-            transport=mock_transport, base_url="http://mock"
-        ) as c:
+        async with httpx.AsyncClient(transport=mock_transport, base_url="http://mock") as c:
             resp = await c.get("/lifecycle/status")
             resp.raise_for_status()
             return resp.json().get("status", "unknown")
@@ -270,14 +264,16 @@ async def test_register_claim_release_workflow():
             async with httpx.AsyncClient(
                 transport=_sup_transport(sup_lm.app), base_url="http://test"
             ) as sup:
-
                 # Step 1: Register
-                reg = await sup.post("/register", json={
-                    "service_name": "workflow-svc",
-                    "base_url": "http://workflow-svc:8300",
-                    "vram_gb_declared": 2.0,
-                    "priority_tier": 2,
-                })
+                reg = await sup.post(
+                    "/register",
+                    json={
+                        "service_name": "workflow-svc",
+                        "base_url": "http://workflow-svc:8300",
+                        "vram_gb_declared": 2.0,
+                        "priority_tier": 2,
+                    },
+                )
                 assert reg.status_code == 200
                 assert reg.json()["status"] == "registered"
 
@@ -346,23 +342,28 @@ async def test_eviction_when_vram_insufficient():
         async with httpx.AsyncClient(
             transport=_sup_transport(sup_lm.app), base_url="http://test"
         ) as sup:
-
             # Register svc-tier3 as loaded (9 GB, tier 3)
-            r1 = await sup.post("/register", json={
-                "service_name": "svc-tier3",
-                "base_url": "http://svc-tier3:8000",
-                "vram_gb_declared": 9.0,
-                "priority_tier": 3,
-            })
+            r1 = await sup.post(
+                "/register",
+                json={
+                    "service_name": "svc-tier3",
+                    "base_url": "http://svc-tier3:8000",
+                    "vram_gb_declared": 9.0,
+                    "priority_tier": 3,
+                },
+            )
             assert r1.status_code == 200
 
             # Register svc-new (5 GB, tier 2, currently unloaded)
-            r2 = await sup.post("/register", json={
-                "service_name": "svc-new",
-                "base_url": "http://svc-new:8000",
-                "vram_gb_declared": 5.0,
-                "priority_tier": 2,
-            })
+            r2 = await sup.post(
+                "/register",
+                json={
+                    "service_name": "svc-new",
+                    "base_url": "http://svc-new:8000",
+                    "vram_gb_declared": 5.0,
+                    "priority_tier": 2,
+                },
+            )
             assert r2.status_code == 200
 
             # Verify svc-tier3 is loaded (9 GB used)
@@ -395,6 +396,7 @@ async def test_tier1_service_never_evicted():
     When the only available VRAM is held by a Tier 1 service, a claim that
     needs that VRAM should fail with 507 Insufficient Storage.
     """
+
     async def _load(svc, url):
         return {"status": "loaded", "vram_gb_actual": 1.0}
 
@@ -415,14 +417,16 @@ async def test_tier1_service_never_evicted():
         async with httpx.AsyncClient(
             transport=_sup_transport(sup_lm.app), base_url="http://test"
         ) as sup:
-
             # Tier 1 service consuming 10 GB (only 1.6 GB free)
-            await sup.post("/register", json={
-                "service_name": "tier1-perm",
-                "base_url": "http://tier1-perm:8000",
-                "vram_gb_declared": 10.0,
-                "priority_tier": 1,
-            })
+            await sup.post(
+                "/register",
+                json={
+                    "service_name": "tier1-perm",
+                    "base_url": "http://tier1-perm:8000",
+                    "vram_gb_declared": 10.0,
+                    "priority_tier": 1,
+                },
+            )
 
             # Override status for big-service to return unloaded
             async def _status_v2(svc, url):
@@ -431,12 +435,15 @@ async def test_tier1_service_never_evicted():
             sup_mod._client.status = _status_v2
 
             # Register big-service needing 5 GB (only 1.6 available, can't evict tier1)
-            await sup.post("/register", json={
-                "service_name": "big-service",
-                "base_url": "http://big-service:8000",
-                "vram_gb_declared": 5.0,
-                "priority_tier": 2,
-            })
+            await sup.post(
+                "/register",
+                json={
+                    "service_name": "big-service",
+                    "base_url": "http://big-service:8000",
+                    "vram_gb_declared": 5.0,
+                    "priority_tier": 2,
+                },
+            )
 
             claim = await sup.post("/claim/big-service")
             assert claim.status_code == 507  # Insufficient Storage
@@ -479,7 +486,7 @@ async def test_expiry_task_skips_service_claimed_since_collection():
 
     sup_mod = _reload_supervisor()
 
-    async with LifespanManager(sup_mod.app) as sup_lm:
+    async with LifespanManager(sup_mod.app):
         sup_mod._client.load = _load
         sup_mod._client.unload = _unload
         sup_mod._client.status = _status
@@ -550,6 +557,7 @@ async def test_tier3_yield_e2e():
     Policy B (2026-05-06): Tier 3 services yield to active higher-priority
     services to prevent GPU thrashing during interactive user sessions.
     """
+
     async def _load(svc_name, base_url):
         return {"status": "loaded", "vram_gb_actual": 1.0}
 
@@ -569,14 +577,16 @@ async def test_tier3_yield_e2e():
         async with httpx.AsyncClient(
             transport=_sup_transport(sup_lm.app), base_url="http://test"
         ) as sup:
-
             # Step 1: Register Tier 2 service (already loaded)
-            r = await sup.post("/register", json={
-                "service_name": "omnivoice-lv",
-                "base_url": "http://omnivoice-lv:8000",
-                "vram_gb_declared": 5.8,
-                "priority_tier": 2,
-            })
+            r = await sup.post(
+                "/register",
+                json={
+                    "service_name": "omnivoice-lv",
+                    "base_url": "http://omnivoice-lv:8000",
+                    "vram_gb_declared": 5.8,
+                    "priority_tier": 2,
+                },
+            )
             assert r.status_code == 200
 
             # Step 2: Claim omnivoice-lv → refcount=1
@@ -585,19 +595,22 @@ async def test_tier3_yield_e2e():
             assert claim_omni.json()["reference_count"] >= 1
 
             # Step 3: Register Tier 3 service
-            r = await sup.post("/register", json={
-                "service_name": "vocal-isolator-lv",
-                "base_url": "http://vocal-isolator-lv:8000",
-                "vram_gb_declared": 3.0,
-                "priority_tier": 3,
-            })
+            r = await sup.post(
+                "/register",
+                json={
+                    "service_name": "vocal-isolator-lv",
+                    "base_url": "http://vocal-isolator-lv:8000",
+                    "vram_gb_declared": 3.0,
+                    "priority_tier": 3,
+                },
+            )
             assert r.status_code == 200
 
             # Step 4: Claim vocal-isolator-lv → must yield with 503
             claim_iso = await sup.post("/claim/vocal-isolator-lv")
-            assert claim_iso.status_code == 503, (
-                f"Expected 503 (Tier 3 yield), got {claim_iso.status_code}: {claim_iso.text}"
-            )
+            assert (
+                claim_iso.status_code == 503
+            ), f"Expected 503 (Tier 3 yield), got {claim_iso.status_code}: {claim_iso.text}"
             body = claim_iso.json()["detail"]
             assert body["reason"] == "tier3_yield"
             assert "omnivoice-lv" in body["active_higher_priority"]
@@ -606,9 +619,9 @@ async def test_tier3_yield_e2e():
             # Verify vocal-isolator refcount was cleaned up (not leaked)
             status = await sup.get("/status")
             svcs = {s["service_name"]: s for s in status.json()["services"]}
-            assert svcs["vocal-isolator-lv"]["reference_count"] == 0, (
-                "Tier 3 yield must not leave a leaked refcount"
-            )
+            assert (
+                svcs["vocal-isolator-lv"]["reference_count"] == 0
+            ), "Tier 3 yield must not leave a leaked refcount"
 
             # Step 5: Release omnivoice-lv → refcount=0
             release = await sup.post("/release/omnivoice-lv")
@@ -636,7 +649,7 @@ async def test_expiry_task_skips_deregistered_service():
     """
     sup_mod = _reload_supervisor()
 
-    async with LifespanManager(sup_mod.app) as sup_lm:
+    async with LifespanManager(sup_mod.app):
         registry = sup_mod._registry
 
         await registry.register(
@@ -686,6 +699,7 @@ async def test_subtitle_pipeline_does_not_self_yield():
     This test verifies the fixed claim order: vocal-isolator first, then
     asr-transcription and back-translator, all in a single session.
     """
+
     async def _load(svc_name, base_url):
         return {"status": "loaded", "vram_gb_actual": 1.0}
 
@@ -705,7 +719,6 @@ async def test_subtitle_pipeline_does_not_self_yield():
         async with httpx.AsyncClient(
             transport=_sup_transport(sup_lm.app), base_url="http://test"
         ) as sup:
-
             # Register all four services with realistic tiers
             for name, vram, tier in [
                 ("omnivoice-lv", 5.8, 2),
@@ -713,12 +726,15 @@ async def test_subtitle_pipeline_does_not_self_yield():
                 ("asr-transcription-lv", 1.9, 2),
                 ("back-translator-lv", 2.8, 2),
             ]:
-                r = await sup.post("/register", json={
-                    "service_name": name,
-                    "base_url": f"http://{name}:8000",
-                    "vram_gb_declared": vram,
-                    "priority_tier": tier,
-                })
+                r = await sup.post(
+                    "/register",
+                    json={
+                        "service_name": name,
+                        "base_url": f"http://{name}:8000",
+                        "vram_gb_declared": vram,
+                        "priority_tier": tier,
+                    },
+                )
                 assert r.status_code == 200
 
             # Simulate the gateway's claim sequence WITH THE FIX applied:
@@ -774,6 +790,7 @@ async def test_subtitle_pipeline_yields_when_omnivoice_active():
     This ensures the fix in test_subtitle_pipeline_does_not_self_yield did not
     accidentally disable the yield rule for legitimate cross-workflow conflicts.
     """
+
     async def _load(svc_name, base_url):
         return {"status": "loaded", "vram_gb_actual": 1.0}
 
@@ -794,7 +811,6 @@ async def test_subtitle_pipeline_yields_when_omnivoice_active():
         async with httpx.AsyncClient(
             transport=_sup_transport(sup_lm.app), base_url="http://test"
         ) as sup:
-
             # Register services
             for name, vram, tier in [
                 ("omnivoice-lv", 5.8, 2),
@@ -802,12 +818,15 @@ async def test_subtitle_pipeline_yields_when_omnivoice_active():
                 ("asr-transcription-lv", 1.9, 2),
                 ("back-translator-lv", 2.8, 2),
             ]:
-                r = await sup.post("/register", json={
-                    "service_name": name,
-                    "base_url": f"http://{name}:8000",
-                    "vram_gb_declared": vram,
-                    "priority_tier": tier,
-                })
+                r = await sup.post(
+                    "/register",
+                    json={
+                        "service_name": name,
+                        "base_url": f"http://{name}:8000",
+                        "vram_gb_declared": vram,
+                        "priority_tier": tier,
+                    },
+                )
                 assert r.status_code == 200
 
             # omnivoice-lv is active (user TTS session — different workflow)

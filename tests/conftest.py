@@ -1,12 +1,12 @@
 """
 gpu-supervisor — shared pytest fixtures.
 """
+
 from __future__ import annotations
 
 import asyncio
 import sys
 from pathlib import Path
-from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,6 +19,7 @@ sys.path.insert(0, str(APP_DIR))
 
 # ── Event loop fixture ────────────────────────────────────────────────────────
 
+
 @pytest.fixture(scope="session")
 def event_loop_policy():
     return asyncio.DefaultEventLoopPolicy()
@@ -26,14 +27,17 @@ def event_loop_policy():
 
 # ── Registry fixture ──────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def registry():
     """Fresh ServiceRegistry for each test."""
     from registry import ServiceRegistry
+
     return ServiceRegistry()
 
 
 # ── LifecycleClient mock fixture ──────────────────────────────────────────────
+
 
 @pytest.fixture
 def mock_client():
@@ -50,6 +54,7 @@ def mock_client():
 
 # ── FastAPI TestClient fixture ────────────────────────────────────────────────
 
+
 @pytest.fixture
 def test_app():
     """
@@ -57,7 +62,7 @@ def test_app():
 
     We patch the lifecycle client to avoid real HTTP calls during API tests.
     """
-    from unittest.mock import patch, AsyncMock, MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     # Patch LifecycleClient before importing main to avoid real HTTP calls
     mock_client = MagicMock()

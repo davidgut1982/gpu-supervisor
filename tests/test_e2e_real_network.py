@@ -26,11 +26,10 @@ Requirements:
 
 Mark: real_network — excluded from default CI via -m "not real_network".
 """
+
 from __future__ import annotations
 
-import asyncio
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -53,7 +52,7 @@ sys.path.insert(0, str(APP_DIR))
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-STARTUP_TIMEOUT_S = 15.0   # Max seconds to wait for uvicorn to become ready
+STARTUP_TIMEOUT_S = 15.0  # Max seconds to wait for uvicorn to become ready
 POLL_INTERVAL_S = 0.2
 
 
@@ -93,11 +92,16 @@ def _start_mock_server(
 
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "uvicorn",
+            sys.executable,
+            "-m",
+            "uvicorn",
             "main:app",
-            "--host", "127.0.0.1",
-            "--port", str(port),
-            "--log-level", "warning",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
         ],
         cwd=str(MOCK_SERVICE_DIR),
         env=env,
@@ -122,9 +126,7 @@ def _wait_for_server(base_url: str, timeout: float = STARTUP_TIMEOUT_S) -> None:
         except Exception:
             pass
         time.sleep(POLL_INTERVAL_S)
-    raise RuntimeError(
-        f"Mock server at {base_url} did not become ready within {timeout}s"
-    )
+    raise RuntimeError(f"Mock server at {base_url} did not become ready within {timeout}s")
 
 
 def _stop_server(proc: subprocess.Popen, timeout: float = 5.0) -> None:
@@ -326,6 +328,5 @@ async def test_lifecycle_client_status_returns_none_on_connection_error():
     state = await client.status("dead-service", f"http://127.0.0.1:{dead_port}")
 
     assert state is None, (
-        "status() should return None (not raise) when service is unreachable; "
-        f"got {state!r}"
+        "status() should return None (not raise) when service is unreachable; " f"got {state!r}"
     )

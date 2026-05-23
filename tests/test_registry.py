@@ -1,14 +1,13 @@
 """
 Unit tests for ServiceRegistry.
 """
+
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-import pytest_asyncio
-
 from registry import ServiceRegistry
 
 
@@ -20,14 +19,14 @@ def _make_entry_kwargs(
     keep_alive: int = 1800,
     state: str = "unloaded",
 ) -> dict:
-    return dict(
-        service_name=name,
-        base_url=base_url,
-        vram_gb_declared=vram_gb,
-        priority_tier=tier,
-        keep_alive_seconds=keep_alive,
-        initial_state=state,
-    )
+    return {
+        "service_name": name,
+        "base_url": base_url,
+        "vram_gb_declared": vram_gb,
+        "priority_tier": tier,
+        "keep_alive_seconds": keep_alive,
+        "initial_state": state,
+    }
 
 
 @pytest.mark.asyncio
@@ -215,8 +214,6 @@ async def test_eviction_candidates_excludes_unloaded():
 
 @pytest.mark.asyncio
 async def test_touch_updates_last_used():
-    import time
-
     reg = ServiceRegistry()
     await reg.register(**_make_entry_kwargs(name="svc-a"))
 
@@ -252,9 +249,9 @@ async def test_used_vram_gb_counts_unknown_state():
 
     # VRAM must STILL be counted (GPU still holds it)
     used_after = await reg.used_vram_gb()
-    assert abs(used_after - 4.0) < 0.001, (
-        f"used_vram_gb should still be 4.0 after failed unload (unknown state), got {used_after}"
-    )
+    assert (
+        abs(used_after - 4.0) < 0.001
+    ), f"used_vram_gb should still be 4.0 after failed unload (unknown state), got {used_after}"
 
 
 @pytest.mark.asyncio
@@ -281,7 +278,6 @@ async def test_tier1_is_idle_expired_returns_false_regardless_of_keep_alive():
     explicit keep_alive_seconds would have caused Tier 1 to be expired.
     """
     import asyncio as _asyncio
-    from datetime import datetime, timezone
 
     reg = ServiceRegistry()
     # Register Tier 1 with a very short keep_alive (1 second) — should never expire
@@ -300,10 +296,10 @@ async def test_tier1_is_idle_expired_returns_false_regardless_of_keep_alive():
     # is_idle_expired() must return False for Tier 1 despite elapsed time
     entry = await reg.get("tier1-permanent")
     assert entry is not None
-    now = datetime.now(tz=timezone.utc)
-    assert entry.is_idle_expired(now) is False, (
-        "Tier 1 service should never be idle-expired regardless of keep_alive_seconds"
-    )
+    now = datetime.now(tz=UTC)
+    assert (
+        entry.is_idle_expired(now) is False
+    ), "Tier 1 service should never be idle-expired regardless of keep_alive_seconds"
 
 
 @pytest.mark.asyncio
@@ -336,9 +332,9 @@ async def test_tier1_not_in_idle_expired_services():
     await _asyncio.sleep(1.1)
 
     expired_names = [e.service_name for e in await reg.idle_expired_services()]
-    assert "tier1-perm" not in expired_names, (
-        "Tier 1 service must never appear in idle_expired_services()"
-    )
-    assert "tier2-expires" in expired_names, (
-        "Tier 2 service with elapsed keep_alive should appear in idle_expired_services()"
-    )
+    assert (
+        "tier1-perm" not in expired_names
+    ), "Tier 1 service must never appear in idle_expired_services()"
+    assert (
+        "tier2-expires" in expired_names
+    ), "Tier 2 service with elapsed keep_alive should appear in idle_expired_services()"

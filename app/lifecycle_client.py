@@ -13,6 +13,7 @@ The client is intentionally stateless — it holds no references to the
 registry and performs no state mutations.  State updates are the caller's
 responsibility.
 """
+
 from __future__ import annotations
 
 import logging
@@ -132,9 +133,7 @@ class LifecycleClient:
         )
         return result
 
-    async def status(
-        self, service_name: str, base_url: str
-    ) -> Optional[str]:
+    async def status(self, service_name: str, base_url: str) -> Optional[str]:
         """
         GET {base_url}/lifecycle/status
 

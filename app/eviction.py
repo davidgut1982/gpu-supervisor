@@ -16,12 +16,13 @@ regardless of tier.  This is enforced by ServiceEntry.is_evictable().
 The eviction logic is async because unloading requires HTTP calls to the
 service's /lifecycle/unload endpoint.
 """
+
 from __future__ import annotations
 
 import logging
 
 from lifecycle_client import LifecycleClient, LifecycleError
-from registry import ServiceEntry, ServiceRegistry
+from registry import ServiceRegistry
 
 log = logging.getLogger("gpu-supervisor")
 

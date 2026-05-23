@@ -19,13 +19,14 @@ Configuration via environment variables:
   UNLOAD_SHOULD_FAIL   — if "true", /lifecycle/unload returns 500 (default: "false")
   PORT                 — listening port (default: 8300)
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -92,11 +93,13 @@ async def health() -> JSONResponse:
 
 @app.get("/lifecycle/status", summary="Get model load state")
 async def lifecycle_status() -> JSONResponse:
-    return JSONResponse({
-        "status": _state,
-        "vram_gb_actual": VRAM_GB if _state == "loaded" else 0.0,
-        "service_name": SERVICE_NAME,
-    })
+    return JSONResponse(
+        {
+            "status": _state,
+            "vram_gb_actual": VRAM_GB if _state == "loaded" else 0.0,
+            "service_name": SERVICE_NAME,
+        }
+    )
 
 
 @app.post("/lifecycle/load", summary="Load model to GPU (simulated)")
@@ -109,11 +112,13 @@ async def lifecycle_load() -> JSONResponse:
 
     if _state == "loaded":
         log.info("lifecycle.load NOOP (already loaded) service=%s", SERVICE_NAME)
-        return JSONResponse({
-            "status": "loaded",
-            "vram_gb_actual": VRAM_GB,
-            "note": "idempotent — already loaded",
-        })
+        return JSONResponse(
+            {
+                "status": "loaded",
+                "vram_gb_actual": VRAM_GB,
+                "note": "idempotent — already loaded",
+            }
+        )
 
     log.info("lifecycle.load START service=%s delay=%.2fs", SERVICE_NAME, LOAD_DELAY)
     await asyncio.sleep(LOAD_DELAY)
@@ -147,15 +152,18 @@ async def lifecycle_unload() -> JSONResponse:
 
 @app.get("/debug/state", summary="Debug: current internal state")
 async def debug_state() -> JSONResponse:
-    return JSONResponse({
-        "service_name": SERVICE_NAME,
-        "state": _state,
-        "vram_gb": VRAM_GB,
-        "load_count": _load_count,
-        "unload_count": _unload_count,
-    })
+    return JSONResponse(
+        {
+            "service_name": SERVICE_NAME,
+            "state": _state,
+            "vram_gb": VRAM_GB,
+            "load_count": _load_count,
+            "unload_count": _unload_count,
+        }
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=PORT)

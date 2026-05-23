@@ -1,17 +1,15 @@
 """
 Unit tests for the eviction algorithm and Tier 1 claim preemption.
 """
+
 from __future__ import annotations
 
-import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
-
 from eviction import NotEnoughVRAMError, evict_for_vram
 from lifecycle_client import LifecycleError
 from registry import ServiceRegistry
@@ -21,7 +19,7 @@ sys.path.insert(0, str(APP_DIR))
 
 
 def _utcnow():
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 async def _add_loaded_service(
@@ -243,6 +241,7 @@ def preempt_client():
 
     with patch("lifecycle_client.LifecycleClient", return_value=mock_lc):
         import main as app_main
+
         app_main._client = mock_lc
 
         with TestClient(app_main.app) as tc:
@@ -253,12 +252,15 @@ def preempt_client():
 
 
 def _register(tc, name: str, vram_gb: float, tier: int) -> None:
-    resp = tc.post("/register", json={
-        "service_name": name,
-        "base_url": f"http://{name}:8000",
-        "vram_gb_declared": vram_gb,
-        "priority_tier": tier,
-    })
+    resp = tc.post(
+        "/register",
+        json={
+            "service_name": name,
+            "base_url": f"http://{name}:8000",
+            "vram_gb_declared": vram_gb,
+            "priority_tier": tier,
+        },
+    )
     assert resp.status_code == 200, f"register failed for {name!r}: {resp.text}"
 
 
@@ -299,16 +301,16 @@ def test_tier1_claim_evicts_idle_tier2_before_granting(preempt_client):
     assert resp.status_code == 200, f"Claim failed: {resp.text}"
 
     data = resp.json()
-    assert "back-translator-lv" in data["evicted"], (
-        f"Expected back-translator-lv in evicted list, got: {data['evicted']}"
-    )
+    assert (
+        "back-translator-lv" in data["evicted"]
+    ), f"Expected back-translator-lv in evicted list, got: {data['evicted']}"
 
     # Tier 2 must be unloaded in registry
     resp_status2 = tc.get("/status")
     svcs2 = {s["service_name"]: s for s in resp_status2.json()["services"]}
-    assert svcs2["back-translator-lv"]["state"] == "unloaded", (
-        f"Expected back-translator-lv to be unloaded, got: {svcs2['back-translator-lv']['state']}"
-    )
+    assert (
+        svcs2["back-translator-lv"]["state"] == "unloaded"
+    ), f"Expected back-translator-lv to be unloaded, got: {svcs2['back-translator-lv']['state']}"
 
     # unload must have been called for Tier 2
     mock_lc.unload.assert_called_once()
@@ -349,16 +351,16 @@ def test_tier1_claim_does_not_evict_busy_tier2(preempt_client):
     assert resp.status_code == 200, f"Claim failed: {resp.text}"
 
     data = resp.json()
-    assert "sentence-embedder-lv" not in data["evicted"], (
-        f"Busy Tier 2 service must not be evicted, got evicted: {data['evicted']}"
-    )
+    assert (
+        "sentence-embedder-lv" not in data["evicted"]
+    ), f"Busy Tier 2 service must not be evicted, got evicted: {data['evicted']}"
 
     # Tier 2 must still be loaded
     resp_status2 = tc.get("/status")
     svcs2 = {s["service_name"]: s for s in resp_status2.json()["services"]}
-    assert svcs2["sentence-embedder-lv"]["state"] == "loaded", (
-        f"Expected sentence-embedder-lv still loaded, got: {svcs2['sentence-embedder-lv']['state']}"
-    )
+    assert (
+        svcs2["sentence-embedder-lv"]["state"] == "loaded"
+    ), f"Expected sentence-embedder-lv still loaded, got: {svcs2['sentence-embedder-lv']['state']}"
 
     # unload must NOT have been called on the Tier 2 service
     mock_lc.unload.assert_not_called()
@@ -393,16 +395,16 @@ def test_tier2_claim_does_not_preempt_other_tier2(preempt_client):
     assert resp.status_code == 200, f"Claim failed: {resp.text}"
 
     data = resp.json()
-    assert "back-translator-lv" not in data["evicted"], (
-        f"Tier 2 claim must not evict other Tier 2 services, got evicted: {data['evicted']}"
-    )
+    assert (
+        "back-translator-lv" not in data["evicted"]
+    ), f"Tier 2 claim must not evict other Tier 2 services, got evicted: {data['evicted']}"
 
     # Tier 2 B must still be loaded
     resp_status2 = tc.get("/status")
     svcs2 = {s["service_name"]: s for s in resp_status2.json()["services"]}
-    assert svcs2["back-translator-lv"]["state"] == "loaded", (
-        f"Expected back-translator-lv still loaded, got: {svcs2['back-translator-lv']['state']}"
-    )
+    assert (
+        svcs2["back-translator-lv"]["state"] == "loaded"
+    ), f"Expected back-translator-lv still loaded, got: {svcs2['back-translator-lv']['state']}"
 
     # No unload calls
     mock_lc.unload.assert_not_called()
