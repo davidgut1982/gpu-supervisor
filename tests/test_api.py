@@ -76,17 +76,22 @@ def register_service(
     base_url: str = "http://test-svc:8000",
     vram_gb: float = 2.0,
     tier: int = 2,
+    device_id: str | None = None,
 ) -> dict:
-    """Helper: register a service via the API."""
-    resp = tc.post(
-        "/register",
-        json={
-            "service_name": name,
-            "base_url": base_url,
-            "vram_gb_declared": vram_gb,
-            "priority_tier": tier,
-        },
-    )
+    """Helper: register a service via the API.
+
+    device_id is optional: when None it is omitted from the payload so existing
+    callers exercise the backward-compatible 'default' device path.
+    """
+    payload = {
+        "service_name": name,
+        "base_url": base_url,
+        "vram_gb_declared": vram_gb,
+        "priority_tier": tier,
+    }
+    if device_id is not None:
+        payload["device_id"] = device_id
+    resp = tc.post("/register", json=payload)
     assert resp.status_code == 200, f"Register failed: {resp.text}"
     return resp.json()
 

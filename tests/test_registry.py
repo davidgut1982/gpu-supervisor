@@ -18,6 +18,7 @@ def _make_entry_kwargs(
     tier: int = 2,
     keep_alive: int = 1800,
     state: str = "unloaded",
+    device_id: str = "default",
 ) -> dict:
     return {
         "service_name": name,
@@ -26,6 +27,7 @@ def _make_entry_kwargs(
         "priority_tier": tier,
         "keep_alive_seconds": keep_alive,
         "initial_state": state,
+        "device_id": device_id,
     }
 
 
@@ -210,6 +212,86 @@ async def test_eviction_candidates_excludes_unloaded():
 
     candidates = await reg.eviction_candidates()
     assert len(candidates) == 0
+
+
+# ── Per-device VRAM accounting and eviction ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_used_vram_gb_for_device_scopes_by_device():
+    """used_vram_gb_for_device must only sum entries on the requested device."""
+    reg = ServiceRegistry()
+    await reg.register(
+        **_make_entry_kwargs(name="p4-a", vram_gb=2.0, state="loaded", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="p4-b", vram_gb=3.0, state="loaded", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="rtx-a", vram_gb=4.0, state="loaded", device_id="1")
+    )
+
+    assert abs(await reg.used_vram_gb_for_device("0") - 5.0) < 0.001
+    assert abs(await reg.used_vram_gb_for_device("1") - 4.0) < 0.001
+    # A device with no services reports 0
+    assert await reg.used_vram_gb_for_device("missing") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_used_vram_gb_for_device_counts_loading_and_unknown():
+    """Like used_vram_gb, the per-device sum counts loaded/loading/unknown only."""
+    reg = ServiceRegistry()
+    await reg.register(
+        **_make_entry_kwargs(name="d0-loaded", vram_gb=2.0, state="loaded", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="d0-loading", vram_gb=1.5, state="loading", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="d0-unknown", vram_gb=1.0, state="unknown", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="d0-unloaded", vram_gb=3.0, state="unloaded", device_id="0")
+    )
+
+    # loaded (2.0) + loading (1.5) + unknown (1.0) = 4.5; unloaded excluded
+    assert abs(await reg.used_vram_gb_for_device("0") - 4.5) < 0.001
+
+
+@pytest.mark.asyncio
+async def test_eviction_candidates_for_device_scopes_by_device():
+    """Candidates must be restricted to the requested device, keeping tier/LRU order."""
+    reg = ServiceRegistry()
+    await reg.register(
+        **_make_entry_kwargs(name="d0-tier2", tier=2, vram_gb=2.0, state="loaded", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="d0-tier3", tier=3, vram_gb=1.5, state="loaded", device_id="0")
+    )
+    await reg.register(
+        **_make_entry_kwargs(name="d1-tier3", tier=3, vram_gb=1.0, state="loaded", device_id="1")
+    )
+
+    cands0 = await reg.eviction_candidates_for_device("0")
+    names0 = [c.service_name for c in cands0]
+    assert names0 == ["d0-tier3", "d0-tier2"], f"Tier3 first, scoped to device 0: {names0}"
+    assert "d1-tier3" not in names0
+
+    cands1 = await reg.eviction_candidates_for_device("1")
+    assert [c.service_name for c in cands1] == ["d1-tier3"]
+
+
+@pytest.mark.asyncio
+async def test_eviction_candidates_for_device_excludes_tier1_and_busy():
+    """is_evictable() still applies per device: Tier 1 and refcount>0 are excluded."""
+    reg = ServiceRegistry()
+    await reg.register(**_make_entry_kwargs(name="d0-tier1", tier=1, state="loaded", device_id="0"))
+    await reg.register(**_make_entry_kwargs(name="d0-busy", tier=3, state="loaded", device_id="0"))
+    await reg.increment_refcount("d0-busy")
+    await reg.register(**_make_entry_kwargs(name="d0-idle", tier=3, state="loaded", device_id="0"))
+
+    names = {c.service_name for c in await reg.eviction_candidates_for_device("0")}
+    assert names == {"d0-idle"}
 
 
 @pytest.mark.asyncio

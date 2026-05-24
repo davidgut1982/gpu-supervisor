@@ -44,15 +44,20 @@ async def evict_for_vram(
     vram_needed: float,
     registry: ServiceRegistry,
     client: LifecycleClient,
+    device_id: str = "default",
 ) -> list[str]:
     """
-    Evict services to free at least `vram_needed` GB of VRAM.
+    Evict services to free at least `vram_needed` GB of VRAM on one GPU device.
 
     Algorithm:
-      1. Collect eviction candidates: loaded, refcount==0, tier > 1
+      1. Collect eviction candidates ON device_id: loaded, refcount==0, tier > 1
       2. Sort: Tier 3 first, then Tier 2; within tier, oldest last_used first
       3. Iterate: unload each candidate until freed >= vram_needed
       4. If freed < vram_needed after all candidates: raise NotEnoughVRAMError
+
+    device_id scopes eviction to a single physical GPU so a claim on one device
+    never frees VRAM on a different device (which would still OOM the target GPU).
+    It defaults to "default" to preserve single-GPU callers.
 
     Returns:
         List of service names that were successfully evicted.
@@ -60,7 +65,7 @@ async def evict_for_vram(
     Raises:
         NotEnoughVRAMError if insufficient VRAM can be freed.
     """
-    candidates = await registry.eviction_candidates()
+    candidates = await registry.eviction_candidates_for_device(device_id)
 
     if not candidates:
         raise NotEnoughVRAMError(

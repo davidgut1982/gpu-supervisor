@@ -20,6 +20,10 @@ class RegisterRequest(BaseModel):
     vram_gb_declared: float
     priority_tier: int
     keep_alive_seconds: Optional[int] = None
+    # Physical GPU device this service loads onto. Defaults to "default" so
+    # existing single-GPU callers that omit the field keep working unchanged.
+    # Multi-GPU deployments pass "0"/"1" to map to GPU0_VRAM_GB/GPU1_VRAM_GB.
+    device_id: str = "default"
 
     @field_validator("priority_tier")
     @classmethod
@@ -76,6 +80,7 @@ class ServiceStatus(BaseModel):
     base_url: str
     vram_gb_declared: float
     priority_tier: int
+    device_id: str  # physical GPU device the service is budgeted against
     state: str  # loaded | unloaded | loading | unloading | unknown
     reference_count: int
     last_used: datetime

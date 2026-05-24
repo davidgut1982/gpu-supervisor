@@ -146,22 +146,29 @@ async def _expiry_task(registry: ServiceRegistry, client: LifecycleClient) -> No
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _registry, _client, _started_at, _background_task_healthy
 
-    # Fail fast if TOTAL_VRAM_GB is unset or invalid.  A wrong VRAM budget would
+    # Fail fast if NO VRAM budget is configured.  A wrong/zero VRAM budget would
     # silently mis-budget every eviction decision, so refuse to start instead of
-    # operating with a misleading default.
-    if settings.total_vram_gb <= 0:
+    # operating with a misleading default.  Multi-GPU deployments may configure
+    # only per-device budgets (GPU0_VRAM_GB / GPU1_VRAM_GB) without TOTAL_VRAM_GB,
+    # so accept startup if ANY budget is > 0.
+    if max(settings.total_vram_gb, settings.gpu0_vram_gb, settings.gpu1_vram_gb) <= 0:
         log.error(
-            "TOTAL_VRAM_GB is unset or <= 0 (got %.2f). "
-            "Set the TOTAL_VRAM_GB environment variable to your GPU's usable VRAM in GB "
-            "(e.g. 11.6 for an RTX 3060 12 GB).",
+            "No GPU VRAM budget configured (TOTAL_VRAM_GB=%.2f, GPU0_VRAM_GB=%.2f, "
+            "GPU1_VRAM_GB=%.2f). Set at least one to your GPU's usable VRAM in GB "
+            "(e.g. TOTAL_VRAM_GB=11.6 for an RTX 3060 12 GB).",
             settings.total_vram_gb,
+            settings.gpu0_vram_gb,
+            settings.gpu1_vram_gb,
         )
         sys.exit(1)
 
     log.info("gpu-supervisor starting up on port %d …", settings.port)
     log.info(
-        "config  total_vram=%.1fGB tier2_keep_alive=%ds tier3_keep_alive=%ds auth=%s",
+        "config  total_vram=%.1fGB gpu0_vram=%.1fGB gpu1_vram=%.1fGB "
+        "tier2_keep_alive=%ds tier3_keep_alive=%ds auth=%s",
         settings.total_vram_gb,
+        settings.gpu0_vram_gb,
+        settings.gpu1_vram_gb,
         settings.tier2_keep_alive_seconds,
         settings.tier3_keep_alive_seconds,
         "enabled" if settings.api_key else "disabled",
@@ -285,13 +292,16 @@ async def register(request: RegisterRequest) -> RegisterResponse:
     registry = _require_registry()
     client = _require_client()
 
-    # Validate VRAM declaration does not exceed total budget
-    if request.vram_gb_declared > settings.total_vram_gb:
+    # Validate VRAM declaration does not exceed the budget of the target device.
+    # Per-device budgeting: a service on GPU0 is checked against GPU0's budget so
+    # a small GPU (e.g. P4 ~7.4 GB) rejects models that only fit the larger GPU.
+    device_budget = settings.budget_for_device(request.device_id)
+    if request.vram_gb_declared > device_budget:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"vram_gb_declared ({request.vram_gb_declared:.1f} GB) exceeds "
-                f"total_vram_gb ({settings.total_vram_gb:.1f} GB)"
+                f"device {request.device_id!r} budget ({device_budget:.1f} GB)"
             ),
         )
 
@@ -325,6 +335,7 @@ async def register(request: RegisterRequest) -> RegisterResponse:
         priority_tier=request.priority_tier,
         keep_alive_seconds=keep_alive,
         initial_state=initial_state,
+        device_id=request.device_id,
     )
 
     status_str = "registered" if is_new else "already_registered_updated"
@@ -395,10 +406,16 @@ async def claim(service_name: str) -> ClaimResponse:
     # This prevents thrashing when the user is actively using interactive
     # services (e.g. tts-service during synthesis, asr-service during transcription).
     if entry.priority_tier == 3:
+        # Only yield to higher-priority services sharing the claimant's device.
+        # A busy Tier 2 on a different GPU (e.g. a 3060 service) must not block a
+        # Tier 3 claim targeting another GPU (e.g. a P4) — they don't contend.
         higher_priority_active = [
             e
             for e in (await registry.get_all())
-            if e.priority_tier < 3 and e.reference_count > 0 and e.service_name != service_name
+            if e.priority_tier < 3
+            and e.reference_count > 0
+            and e.device_id == entry.device_id
+            and e.service_name != service_name
         ]
         if higher_priority_active:
             # Decrement the refcount we just incremented — caller didn't get the claim
@@ -429,12 +446,16 @@ async def claim(service_name: str) -> ClaimResponse:
     # VRAM contention is preferable to interrupting an active claim.
     if entry.priority_tier == 1:
         all_services = await registry.get_all()
+        # Scope preemption to the claimant's own device: a Tier 2 service on a
+        # different physical GPU cannot OOM-conflict with this load, so it must
+        # not be evicted (would free VRAM on the wrong device).
         idle_tier2 = [
             s
             for s in all_services
             if s.priority_tier == 2
             and s.state == "loaded"
             and s.reference_count == 0
+            and s.device_id == entry.device_id
             and s.service_name != service_name
         ]
         busy_tier2 = [
@@ -443,6 +464,7 @@ async def claim(service_name: str) -> ClaimResponse:
             if s.priority_tier == 2
             and s.state == "loaded"
             and s.reference_count > 0
+            and s.device_id == entry.device_id
             and s.service_name != service_name
         ]
         for s in busy_tier2:
@@ -519,20 +541,23 @@ async def claim(service_name: str) -> ClaimResponse:
                 evicted=evicted,
             )
 
-        # Check VRAM budget
-        used_gb = await registry.used_vram_gb()
-        available_gb = settings.total_vram_gb - used_gb
+        # Check VRAM budget — scoped to the service's physical GPU device so that
+        # accounting and eviction only consider VRAM on the device being loaded to.
+        device_id = entry.device_id
+        used_gb = await registry.used_vram_gb_for_device(device_id)
+        available_gb = settings.budget_for_device(device_id) - used_gb
         vram_needed = entry.vram_gb_declared - available_gb
 
         if vram_needed > 0:
             log.info(
-                "claim.eviction_needed  service=%s vram_needed=%.2fGB available=%.2fGB",
+                "claim.eviction_needed  service=%s device=%s vram_needed=%.2fGB available=%.2fGB",
                 service_name,
+                device_id,
                 entry.vram_gb_declared,
                 available_gb,
             )
             try:
-                evicted = await evict_for_vram(vram_needed, registry, client)
+                evicted = await evict_for_vram(vram_needed, registry, client, device_id)
                 _last_eviction = _utcnow()
                 _eviction_count += len(evicted)
             except NotEnoughVRAMError as exc:
@@ -655,6 +680,7 @@ async def status() -> SupervisorStatus:
             base_url=e.base_url,
             vram_gb_declared=e.vram_gb_declared,
             priority_tier=e.priority_tier,
+            device_id=e.device_id,
             state=e.state,
             reference_count=e.reference_count,
             last_used=e.last_used,

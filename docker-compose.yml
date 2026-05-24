@@ -14,9 +14,16 @@ services:
       - "8202:8202"
 
     environment:
-      # REQUIRED: set this to your GPU's usable VRAM in GB (e.g. RTX 3060 ~ 11.6).
-      # The supervisor will refuse to start if this is unset or <= 0.
-      TOTAL_VRAM_GB: "${TOTAL_VRAM_GB:?Set TOTAL_VRAM_GB in your environment or .env file}"
+      # REQUIRED (single-GPU): set this to your GPU's usable VRAM in GB
+      # (e.g. RTX 3060 ~ 11.6). The supervisor refuses to start unless at least
+      # one of TOTAL_VRAM_GB / GPU0_VRAM_GB / GPU1_VRAM_GB is > 0.
+      # Kept for backward compatibility and as the fallback for device_id="default".
+      TOTAL_VRAM_GB: "11.6"
+      # Per-device budgets for multi-GPU hosts. Services that register with
+      # device_id="0"/"1" are budgeted and evicted against these independently,
+      # so a P4 (GPU0) and an RTX 3060 (GPU1) can't evict each other or OOM-conflict.
+      GPU0_VRAM_GB: "7.4"
+      GPU1_VRAM_GB: "11.6"
       LOG_LEVEL: "INFO"
       # Optional: enable API key auth by setting a non-empty value.
       # API_KEY: "your-secret-key"

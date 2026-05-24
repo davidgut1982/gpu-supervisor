@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     # this is > 0 at startup and exits with a clear error otherwise.
     total_vram_gb: float = 0.0
 
+    # ── Per-device GPU budgets (multi-GPU deployments) ───────────────────────
+    # Optional per-physical-GPU VRAM budgets. When > 0 they scope claim/eviction
+    # accounting to that device so co-resident GPUs (e.g. a P4 and an RTX 3060)
+    # cannot evict each other or OOM-conflict. When 0 (the default), the device
+    # falls back to total_vram_gb, preserving single-GPU behaviour.
+    # Env vars: GPU0_VRAM_GB, GPU1_VRAM_GB.
+    gpu0_vram_gb: float = 0.0
+    gpu1_vram_gb: float = 0.0
+
     # ── Per-tier keep-alive defaults ─────────────────────────────────────────
     # Tier 1: effectively infinite (never auto-evict)
     tier1_keep_alive_seconds: int = 99_999_999
@@ -72,6 +81,23 @@ class Settings(BaseSettings):
             3: self.tier3_keep_alive_seconds,
         }
         return mapping[tier]
+
+    def budget_for_device(self, device_id: str) -> float:
+        """Return the VRAM budget (GB) for a physical GPU device.
+
+        Why: Centralises the device_id → budget mapping so claim/register/eviction
+        all agree on how much VRAM a device has, and so single-GPU deployments that
+        only set TOTAL_VRAM_GB keep working without per-device config.
+        What: Maps "0" → gpu0_vram_gb (or total_vram_gb if unset), "1" → gpu1_vram_gb
+        (or total_vram_gb if unset), and any other id (incl. "default") → total_vram_gb.
+        Test: With total=11.6, gpu0=7.4, gpu1=11.6: assert budget_for_device("0")==7.4,
+        ("1")==11.6, ("default")==11.6; with gpu0 unset assert ("0")==total_vram_gb.
+        """
+        if device_id == "0":
+            return self.gpu0_vram_gb or self.total_vram_gb
+        if device_id == "1":
+            return self.gpu1_vram_gb or self.total_vram_gb
+        return self.total_vram_gb
 
 
 settings = Settings()

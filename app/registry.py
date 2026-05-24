@@ -36,6 +36,9 @@ class ServiceEntry:
     vram_gb_declared: float
     priority_tier: int
     keep_alive_seconds: int
+    # Physical GPU device this service is budgeted against. "default" preserves
+    # single-GPU behaviour; "0"/"1" scope VRAM accounting and eviction per device.
+    device_id: str = "default"
 
     # Mutable fields updated during operation
     state: str = "unknown"  # loaded | unloaded | loading | unloading | unknown
@@ -89,6 +92,7 @@ class ServiceRegistry:
         priority_tier: int,
         keep_alive_seconds: int,
         initial_state: str = "unknown",
+        device_id: str = "default",
     ) -> tuple[ServiceEntry, bool]:
         """
         Register or update a service entry.
@@ -104,6 +108,7 @@ class ServiceRegistry:
                 existing.vram_gb_declared = vram_gb_declared
                 existing.priority_tier = priority_tier
                 existing.keep_alive_seconds = keep_alive_seconds
+                existing.device_id = device_id
                 # Only update state if the new state is not "unknown" so that
                 # a re-registration during a running load doesn't clobber state.
                 if initial_state != "unknown":
@@ -124,6 +129,7 @@ class ServiceRegistry:
                 vram_gb_declared=vram_gb_declared,
                 priority_tier=priority_tier,
                 keep_alive_seconds=keep_alive_seconds,
+                device_id=device_id,
                 state=initial_state,
             )
             self._put(entry)
@@ -208,6 +214,25 @@ class ServiceRegistry:
                 if e.state in ("loaded", "loading", "unknown")
             )
 
+    async def used_vram_gb_for_device(self, device_id: str) -> float:
+        """
+        Sum of vram_gb_declared for VRAM-holding services on one GPU device.
+
+        Why: Per-device budgeting requires accounting that is scoped to a single
+        physical GPU so a service on GPU0 does not count against GPU1's budget
+        (which would cause spurious eviction or false OOM avoidance).
+        What: Like used_vram_gb() but filtered to entries whose device_id matches;
+        "unknown" is included for the same failed-unload over-commit safety reason.
+        Test: Register two loaded services on device "0" (2+3 GB) and one on "1"
+        (4 GB); assert used_vram_gb_for_device("0") == 5.0 and ("1") == 4.0.
+        """
+        async with self._lock:
+            return sum(
+                e.vram_gb_declared
+                for e in self._services.values()
+                if e.device_id == device_id and e.state in ("loaded", "loading", "unknown")
+            )
+
     async def eviction_candidates(self) -> list[ServiceEntry]:
         """
         Return services eligible for eviction, sorted by eviction priority:
@@ -216,6 +241,25 @@ class ServiceRegistry:
         """
         async with self._lock:
             candidates = [e for e in self._services.values() if e.is_evictable()]
+        # Sort: highest tier first (3 > 2 > 1), then oldest last_used first
+        candidates.sort(key=lambda e: (-e.priority_tier, e.last_used))
+        return candidates
+
+    async def eviction_candidates_for_device(self, device_id: str) -> list[ServiceEntry]:
+        """
+        Eviction candidates restricted to a single GPU device, in eviction order.
+
+        Why: A claim on GPU0 must only ever evict services that occupy GPU0; evicting
+        a GPU1 service would free VRAM on the wrong device and still OOM the GPU0 load.
+        What: Same Tier3→Tier2 + LRU ordering as eviction_candidates() but filtered to
+        entries whose device_id matches (Tier 1 still excluded via is_evictable()).
+        Test: Load evictable Tier 3 on device "0" and Tier 3 on device "1"; assert
+        eviction_candidates_for_device("0") contains only the device-"0" service.
+        """
+        async with self._lock:
+            candidates = [
+                e for e in self._services.values() if e.device_id == device_id and e.is_evictable()
+            ]
         # Sort: highest tier first (3 > 2 > 1), then oldest last_used first
         candidates.sort(key=lambda e: (-e.priority_tier, e.last_used))
         return candidates

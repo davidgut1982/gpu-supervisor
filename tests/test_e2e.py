@@ -389,6 +389,97 @@ async def test_eviction_when_vram_insufficient():
 
 
 @pytest.mark.asyncio
+async def test_multi_device_services_do_not_cross_evict():
+    """
+    Per-device budgeting: a P4 service (device_id="0", 6 GB) and a 3060 service
+    (device_id="1", 10 GB) must not evict each other when both are claimed,
+    even though their combined 16 GB exceeds either single GPU's budget.
+
+    Without per-device scoping the second claim would see 6+? GB already "used"
+    and evict the first to make room. With scoping, each device is budgeted
+    independently (here both fall back to TOTAL_VRAM_GB=11.6), so 6 GB on GPU0
+    and 10 GB on GPU1 both fit and no eviction occurs.
+
+    Fixes the P4+3060 cross-device eviction conflict (back-translator on the P4
+    vs vocal-isolator/ASR on the 3060).
+    """
+    unloaded_services: list[str] = []
+
+    async def _load(svc_name, base_url):
+        return {"status": "loaded", "vram_gb_actual": 1.0}
+
+    async def _unload(svc_name, base_url):
+        unloaded_services.append(svc_name)
+        return {"status": "unloaded"}
+
+    async def _status(svc_name, base_url):
+        return "unloaded"
+
+    sup_mod = _reload_supervisor()
+
+    async with LifespanManager(sup_mod.app) as sup_lm:
+        sup_mod._client.load = _load
+        sup_mod._client.unload = _unload
+        sup_mod._client.status = _status
+
+        async with httpx.AsyncClient(
+            transport=_sup_transport(sup_lm.app), base_url="http://test"
+        ) as sup:
+            # P4 service on GPU0 (6 GB), Tier 2
+            r0 = await sup.post(
+                "/register",
+                json={
+                    "service_name": "back-translator-lv",
+                    "base_url": "http://back-translator-lv:8000",
+                    "vram_gb_declared": 6.0,
+                    "priority_tier": 2,
+                    "device_id": "0",
+                },
+            )
+            assert r0.status_code == 200
+
+            # 3060 service on GPU1 (10 GB), Tier 2
+            r1 = await sup.post(
+                "/register",
+                json={
+                    "service_name": "vocal-isolator-lv",
+                    "base_url": "http://vocal-isolator-lv:8000",
+                    "vram_gb_declared": 10.0,
+                    "priority_tier": 2,
+                    "device_id": "1",
+                },
+            )
+            assert r1.status_code == 200
+
+            # Claim both — combined 16 GB > 11.6 GB single-GPU budget, but they
+            # live on different devices so neither should be evicted.
+            claim0 = await sup.post("/claim/back-translator-lv")
+            assert claim0.status_code == 200, f"P4 claim failed: {claim0.text}"
+            assert claim0.json()["evicted"] == []
+
+            claim1 = await sup.post("/claim/vocal-isolator-lv")
+            assert claim1.status_code == 200, f"3060 claim failed: {claim1.text}"
+            assert claim1.json()["evicted"] == []
+
+            # Neither service was unloaded to make room for the other
+            assert unloaded_services == [], (
+                f"Cross-device eviction occurred — services on different GPUs must "
+                f"not evict each other, but unloaded: {unloaded_services}"
+            )
+
+            # Both remain loaded with the correct device_id in /status
+            status = await sup.get("/status")
+            svcs = {s["service_name"]: s for s in status.json()["services"]}
+            assert svcs["back-translator-lv"]["state"] == "loaded"
+            assert svcs["back-translator-lv"]["device_id"] == "0"
+            assert svcs["vocal-isolator-lv"]["state"] == "loaded"
+            assert svcs["vocal-isolator-lv"]["device_id"] == "1"
+
+    for mod in _SUPERVISOR_MODULES:
+        sys.modules.pop(mod, None)
+
+
+@pytest.mark.asyncio
 async def test_tier1_service_never_evicted():
     """
     Tier 1 service is never auto-evicted.
