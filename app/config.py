@@ -10,7 +10,11 @@ Test: Set TOTAL_VRAM_GB=12, import settings, assert settings.total_vram_gb == 12
 
 from __future__ import annotations
 
+import logging
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("gpu-supervisor.config")
 
 
 class Settings(BaseSettings):
@@ -90,6 +94,8 @@ class Settings(BaseSettings):
         only set TOTAL_VRAM_GB keep working without per-device config.
         What: Maps "0" → gpu0_vram_gb (or total_vram_gb if unset), "1" → gpu1_vram_gb
         (or total_vram_gb if unset), and any other id (incl. "default") → total_vram_gb.
+        An unrecognised, non-"default" device_id logs a warning so misconfigured
+        callers are surfaced rather than silently mis-budgeted.
         Test: With total=11.6, gpu0=7.4, gpu1=11.6: assert budget_for_device("0")==7.4,
         ("1")==11.6, ("default")==11.6; with gpu0 unset assert ("0")==total_vram_gb.
         """
@@ -97,6 +103,8 @@ class Settings(BaseSettings):
             return self.gpu0_vram_gb or self.total_vram_gb
         if device_id == "1":
             return self.gpu1_vram_gb or self.total_vram_gb
+        if device_id != "default":
+            log.warning("Unknown device_id %r — falling back to total_vram_gb budget", device_id)
         return self.total_vram_gb
 
 

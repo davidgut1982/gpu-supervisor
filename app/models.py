@@ -87,11 +87,31 @@ class ServiceStatus(BaseModel):
     keep_alive_seconds: int
 
 
+class PerDeviceVRAM(BaseModel):
+    """Per-physical-GPU VRAM accounting for the /status response.
+
+    Why: Aggregate fields alone are misleading in multi-GPU mode — summing usage
+    across devices against a single budget can report negative availability. A
+    per-device breakdown lets monitoring see each GPU's true headroom.
+    What: Holds total/used/available VRAM (GB) for one device_id.
+    Test: For device "0" with 7.4 GB budget and 6.0 GB used, assert
+    available_vram_gb == 1.4.
+    """
+
+    total_vram_gb: float
+    used_vram_gb: float
+    available_vram_gb: float
+
+
 class SupervisorStatus(BaseModel):
     services: list[ServiceStatus]
     total_vram_gb: float
     used_vram_gb: float
     available_vram_gb: float
+    # Per-device VRAM breakdown keyed by device_id. Empty when no services are
+    # registered. Authoritative for multi-GPU availability; the aggregate fields
+    # above are sums and may not reflect per-device headroom.
+    per_device: dict[str, PerDeviceVRAM]
     started_at: datetime
     last_eviction: Optional[datetime]
     eviction_count: int

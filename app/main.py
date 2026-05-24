@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from lifecycle_client import LifecycleClient, LifecycleError
 from models import (
     ClaimResponse,
     HealthResponse,
+    PerDeviceVRAM,
     RegisterRequest,
     RegisterResponse,
     ServiceStatus,
@@ -62,8 +64,25 @@ _eviction_count: int = 0
 _background_task_healthy: bool = True
 
 # Serialise load/unload operations to prevent concurrent VRAM budget races.
-# A single asyncio.Lock is sufficient because the event loop is single-threaded.
-_load_lock: asyncio.Lock = asyncio.Lock()
+# Per-device locks so loads onto distinct GPUs (e.g. P4 vs 3060) can proceed
+# concurrently — a global lock would needlessly serialise non-contending devices.
+_load_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_load_lock(device_id: str) -> asyncio.Lock:
+    """Return (creating on first use) the load lock for a physical GPU device.
+
+    Why: Serialise load/eviction only among claims targeting the same device so
+    that VRAM budget races are prevented without blocking loads onto other GPUs.
+    What: Lazily creates and caches one asyncio.Lock per device_id. Safe without
+    its own lock because the event loop is single-threaded (no await between the
+    membership check and assignment).
+    Test: Assert _get_load_lock("0") is _get_load_lock("0") and is not
+    _get_load_lock("1").
+    """
+    if device_id not in _load_locks:
+        _load_locks[device_id] = asyncio.Lock()
+    return _load_locks[device_id]
 
 
 def _utcnow() -> datetime:
@@ -395,8 +414,6 @@ async def claim(service_name: str) -> ClaimResponse:
     # same service see refcount > 0 and don't double-load.
     await registry.increment_refcount(service_name)
 
-    import time
-
     t0 = time.monotonic()
     evicted: list[str] = []
 
@@ -476,7 +493,7 @@ async def claim(service_name: str) -> ClaimResponse:
                 s.reference_count,
             )
         if idle_tier2:
-            async with _load_lock:
+            async with _get_load_lock(entry.device_id):
                 for s in idle_tier2:
                     # Re-check under the lock — a concurrent claim may have taken it
                     fresh = await registry.get(s.service_name)
@@ -522,8 +539,8 @@ async def claim(service_name: str) -> ClaimResponse:
             evicted=evicted,
         )
 
-    # Service needs loading — serialise this section
-    async with _load_lock:
+    # Service needs loading — serialise this section per device
+    async with _get_load_lock(entry.device_id):
         # Re-read entry in case another coroutine loaded it while we waited
         entry = await registry.get(service_name)
         if entry is None:
@@ -672,7 +689,37 @@ async def status() -> SupervisorStatus:
     registry = _require_registry()
 
     entries = await registry.get_all()
-    used_gb = sum(e.vram_gb_declared for e in entries if e.state in ("loaded", "loading"))
+
+    # "unknown" counts as used: a failed unload leaves VRAM most likely still
+    # allocated. This mirrors registry.used_vram_gb_for_device() so the reported
+    # usage matches the accounting eviction decisions are based on.
+    _vram_holding = ("loaded", "loading", "unknown")
+    used_gb = sum(e.vram_gb_declared for e in entries if e.state in _vram_holding)
+
+    # Build per-device breakdown so multi-GPU deployments get correct per-GPU
+    # headroom. The aggregate fields below sum across devices against the sum of
+    # device budgets, avoiding the negative available_vram_gb that a single shared
+    # budget produced when both GPUs were in use.
+    device_ids = {e.device_id for e in entries}
+    per_device: dict[str, PerDeviceVRAM] = {}
+    for dev_id in sorted(device_ids):
+        dev_budget = settings.budget_for_device(dev_id)
+        dev_used = sum(
+            e.vram_gb_declared
+            for e in entries
+            if e.device_id == dev_id and e.state in _vram_holding
+        )
+        per_device[dev_id] = PerDeviceVRAM(
+            total_vram_gb=dev_budget,
+            used_vram_gb=round(dev_used, 2),
+            available_vram_gb=round(dev_budget - dev_used, 2),
+        )
+
+    # Aggregate budget is the sum of all distinct device budgets so it agrees with
+    # the per-device totals. Falls back to total_vram_gb when nothing is registered.
+    total_budget = (
+        sum(d.total_vram_gb for d in per_device.values()) if per_device else settings.total_vram_gb
+    )
 
     services = [
         ServiceStatus(
@@ -691,9 +738,10 @@ async def status() -> SupervisorStatus:
 
     return SupervisorStatus(
         services=services,
-        total_vram_gb=settings.total_vram_gb,
+        total_vram_gb=round(total_budget, 3),
         used_vram_gb=round(used_gb, 3),
-        available_vram_gb=round(settings.total_vram_gb - used_gb, 3),
+        available_vram_gb=round(total_budget - used_gb, 3),
+        per_device=per_device,
         started_at=_started_at or _utcnow(),
         last_eviction=_last_eviction,
         eviction_count=_eviction_count,
