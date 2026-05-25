@@ -7,6 +7,7 @@ and the measured-vs-declared comparison that powers /status reconciliation.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,57 @@ async def test_poll_once_disables_when_nvidia_smi_missing(monkeypatch):
     await collector._poll_once()
     assert collector._available is False
     assert collector.latest() == {}
+
+
+@pytest.mark.asyncio
+async def test_poll_once_transient_error_does_not_disable(monkeypatch):
+    # A CalledProcessError (non-zero exit / timeout / driver hiccup) is transient:
+    # it must NOT permanently disable polling. The failure is counted and retried.
+    collector = GpuMetricsCollector()
+    # Seed _available True as if a prior poll had succeeded, so we can prove the
+    # transient failure leaves it untouched rather than flipping to False.
+    collector._available = True
+
+    def _raise():
+        raise subprocess.CalledProcessError(returncode=1, cmd="nvidia-smi")
+
+    monkeypatch.setattr(collector, "_run_nvidia_smi", _raise)
+    await collector._poll_once()
+    assert collector._available is True  # still enabled — not permanently disabled
+    assert collector._consecutive_failures == 1
+    assert collector.latest() == {}
+
+
+@pytest.mark.asyncio
+async def test_poll_once_disables_after_consecutive_transient_failures(monkeypatch):
+    # After _MAX_CONSECUTIVE_FAILURES (5) consecutive transient failures, give up
+    # and disable reconciliation so we don't retry a permanently broken driver forever.
+    collector = GpuMetricsCollector()
+    collector._available = True
+
+    def _raise():
+        raise subprocess.CalledProcessError(returncode=1, cmd="nvidia-smi")
+
+    monkeypatch.setattr(collector, "_run_nvidia_smi", _raise)
+    for attempt in range(1, 5):
+        await collector._poll_once()
+        assert collector._available is True  # still retrying before the 5th
+        assert collector._consecutive_failures == attempt
+    await collector._poll_once()  # 5th consecutive failure
+    assert collector._consecutive_failures == 5
+    assert collector._available is False  # disabled on the 5th
+
+
+@pytest.mark.asyncio
+async def test_poll_once_resets_failure_counter_on_success(monkeypatch):
+    # A successful parse clears accumulated transient failures so an isolated
+    # glitch followed by recovery never counts toward the disable threshold.
+    collector = GpuMetricsCollector()
+    collector._consecutive_failures = 3
+    monkeypatch.setattr(collector, "_run_nvidia_smi", lambda: _SAMPLE_CSV)
+    await collector._poll_once()
+    assert collector._available is True
+    assert collector._consecutive_failures == 0
 
 
 @pytest.mark.asyncio

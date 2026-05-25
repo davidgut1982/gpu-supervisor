@@ -35,6 +35,11 @@ _NVIDIA_SMI_ARGS = [
 # Bound the subprocess so a hung driver can't wedge the poll loop forever.
 _NVIDIA_SMI_TIMEOUT_SECONDS = 15
 
+# After this many consecutive non-FileNotFoundError failures (timeouts, non-zero
+# exits, driver hiccups), give up and disable reconciliation. A few transient
+# failures are tolerated and retried; a persistent one is treated as broken.
+_MAX_CONSECUTIVE_FAILURES = 5
+
 
 @dataclass
 class DeviceMetrics:
@@ -86,6 +91,10 @@ class GpuMetricsCollector:
         # None = not yet probed; True/False = nvidia-smi usable or not. Once False
         # the loop stops sampling so we don't spam failures every interval.
         self._available: bool | None = None
+        # Counts consecutive transient invocation failures (not FileNotFoundError).
+        # Reset to 0 on any successful parse; once it hits _MAX_CONSECUTIVE_FAILURES
+        # we disable reconciliation. Tolerates a hiccup at boot without giving up.
+        self._consecutive_failures: int = 0
 
     async def start(self) -> None:
         """Probe nvidia-smi once, then launch the background polling task.
@@ -144,9 +153,13 @@ class GpuMetricsCollector:
 
         Why: Keeps the cached snapshot fresh without blocking the event loop.
         What: Sleeps poll_interval, polls, repeats; logs and continues on transient
-        errors so one bad sample doesn't kill the loop.
-        Test: Patch _poll_once to record calls and sleep to no-op once, assert it loops.
+        errors so one bad sample doesn't kill the loop. Exits immediately if polling
+        has been disabled, so a flipped flag can never leave a zombie loop running.
+        Test: Patch _poll_once to record calls and sleep to no-op once, assert it loops;
+        set _available False and assert the loop returns without polling.
         """
+        if not self._available:
+            return
         while True:
             try:
                 await asyncio.sleep(self._poll_interval)
@@ -161,28 +174,51 @@ class GpuMetricsCollector:
         """Run nvidia-smi off the event loop, parse, and update the cache.
 
         Why: subprocess is blocking; running it in the default executor keeps the
-        FastAPI event loop responsive. Any failure permanently disables polling so
-        a missing driver doesn't generate noise every interval.
+        FastAPI event loop responsive. A missing binary (FileNotFoundError) is fatal
+        and permanently disables polling, but transient failures (timeout, non-zero
+        exit, a driver hiccup at boot) are tolerated and retried — only after
+        _MAX_CONSECUTIVE_FAILURES in a row do we give up, so a momentary glitch can't
+        permanently silence reconciliation.
         What: Invokes _run_nvidia_smi via run_in_executor, parses CSV into the cache,
         and emits a WARNING-eligible leak summary handled by callers reading latest().
         Test: Patch _run_nvidia_smi to canned CSV, await this, assert _latest updated
-        and _available True; patch it to raise, assert _available False and cache empty.
+        and _available True; patch it to raise FileNotFoundError, assert _available
+        False; patch it to raise CalledProcessError once, assert _available stays True
+        and _consecutive_failures == 1; raise it N times, assert _available False on Nth.
         """
         loop = asyncio.get_running_loop()
         try:
             raw = await loop.run_in_executor(None, self._run_nvidia_smi)
         except FileNotFoundError:
+            # Binary absent — no point retrying, disable permanently.
             self._available = False
             return
         except (subprocess.SubprocessError, OSError) as exc:
-            self._available = False
-            log.warning("gpu_metrics nvidia-smi invocation failed: %s", exc)
+            # Transient: do NOT touch _available here; let the loop retry next
+            # interval. Only disable after too many consecutive failures.
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                self._available = False
+                log.warning(
+                    "gpu_metrics nvidia-smi failing consistently after %d attempts, "
+                    "disabling reconciliation: %s",
+                    self._consecutive_failures,
+                    exc,
+                )
+            else:
+                log.warning(
+                    "gpu_metrics nvidia-smi invocation failed (attempt %d/%d), " "will retry: %s",
+                    self._consecutive_failures,
+                    _MAX_CONSECUTIVE_FAILURES,
+                    exc,
+                )
             return
 
         parsed = self._parse_csv(raw)
         if parsed:
             self._latest = parsed
             self._available = True
+            self._consecutive_failures = 0
             if self._on_sample is not None:
                 await self._on_sample(parsed)
         elif self._available is None:
