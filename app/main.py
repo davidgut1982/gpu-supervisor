@@ -33,11 +33,14 @@ from config import settings
 from eviction import NotEnoughVRAMError, evict_for_vram
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from gpu_metrics import DeviceMetrics, GpuMetricsCollector
 from lifecycle_client import LifecycleClient, LifecycleError
 from models import (
     ClaimResponse,
+    DeviceReconciliation,
     HealthResponse,
     PerDeviceVRAM,
+    Reconciliation,
     RegisterRequest,
     RegisterResponse,
     ServiceStatus,
@@ -58,6 +61,7 @@ log = logging.getLogger("gpu-supervisor")
 
 _registry: Optional[ServiceRegistry] = None
 _client: Optional[LifecycleClient] = None
+_gpu_metrics: Optional[GpuMetricsCollector] = None
 _started_at: Optional[datetime] = None
 _last_eviction: Optional[datetime] = None
 _eviction_count: int = 0
@@ -87,6 +91,93 @@ def _get_load_lock(device_id: str) -> asyncio.Lock:
 
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
+
+
+# ── Soft reconciliation (nvidia-smi vs declared accounting) ──────────────────
+
+
+def _declared_sum_mb_by_index(entries: list, nvidia_index: str) -> int:
+    """Sum declared VRAM (MB) of loaded services mapped to one nvidia-smi index.
+
+    Why: Reconciliation compares measured VRAM (keyed by nvidia-smi index "0"/"1")
+    against the supervisor's declared footprints (keyed by device_id "0"/"1"/"default").
+    Single-GPU services register as "default"; physically they live on GPU index 0,
+    so they must count toward index "0"'s declared sum to compare meaningfully.
+    What: Sums vram_gb_declared * 1024 for entries in state "loaded" whose device_id
+    equals nvidia_index, plus "default" entries when nvidia_index == "0". Only "loaded"
+    counts (matches the reconciliation constraint: in-flight/unknown states are excluded
+    from the declared baseline).
+    Test: One loaded "0" service at 2.8 GB and one "default" at 0.0 → index "0" sum is
+    ~2867 MB; a loaded "1" service is excluded from index "0".
+    """
+    total_gb = 0.0
+    for e in entries:
+        if e.state != "loaded":
+            continue
+        if e.device_id == nvidia_index or (nvidia_index == "0" and e.device_id == "default"):
+            total_gb += e.vram_gb_declared
+    return round(total_gb * 1024)
+
+
+def _build_reconciliation(
+    metrics: dict[str, DeviceMetrics],
+    entries: list,
+) -> Reconciliation:
+    """Compare measured per-device VRAM against declared sums into a Reconciliation.
+
+    Why: Single place that turns an nvidia-smi snapshot + registry state into the
+    /status reconciliation block and the warning list, so the endpoint and the
+    background warning logger stay consistent.
+    What: For each measured device computes delta = actual_used - declared_sum,
+    flags "leak_suspected" when delta > leak_threshold_mb, and emits a human-readable
+    warning per leaking device. Returns an empty Reconciliation when no sample exists.
+    Test: metrics {"0": used 4000} + loaded "0" declaring 2.8 GB, threshold 500 →
+    devices["0"].status == "leak_suspected" and warnings has one entry.
+    """
+    if not metrics:
+        return Reconciliation()
+
+    devices: dict[str, DeviceReconciliation] = {}
+    warnings: list[str] = []
+    sampled_at: Optional[datetime] = None
+
+    for index, dm in metrics.items():
+        sampled_at = dm.sampled_at
+        declared = _declared_sum_mb_by_index(entries, index)
+        delta = dm.used_vram_mb - declared
+        leaking = delta > settings.leak_threshold_mb
+        status_str = "leak_suspected" if leaking else "ok"
+        devices[index] = DeviceReconciliation(
+            actual_used_mb=dm.used_vram_mb,
+            declared_sum_mb=declared,
+            delta_mb=delta,
+            status=status_str,
+        )
+        if leaking:
+            warnings.append(
+                f"GPU device {index} ({dm.name}): actual={dm.used_vram_mb}MB "
+                f"declared_sum={declared}MB delta=+{delta}MB — possible leaked CUDA context"
+            )
+
+    return Reconciliation(sampled_at=sampled_at, devices=devices, warnings=warnings)
+
+
+async def _log_reconciliation_warnings(metrics: dict[str, DeviceMetrics]) -> None:
+    """on_sample callback: log a WARNING for each device whose VRAM exceeds declared.
+
+    Why: Surfaces suspected leaks in the logs every poll (not just when /status is
+    hit), giving an operator a passive alarm without an external monitor.
+    What: Builds reconciliation against the current registry and logs each warning
+    string at WARNING level. No-op when the registry isn't initialised or no leaks.
+    Test: Patch registry to one loaded service under-declaring vs metrics, invoke this,
+    assert a WARNING containing "possible leaked CUDA context" is emitted.
+    """
+    if _registry is None:
+        return
+    entries = await _registry.get_all()
+    recon = _build_reconciliation(metrics, entries)
+    for warning in recon.warnings:
+        log.warning("reconciliation.leak_suspected  %s", warning)
 
 
 # ── Background keep-alive expiry task ─────────────────────────────────────────
@@ -163,7 +254,7 @@ async def _expiry_task(registry: ServiceRegistry, client: LifecycleClient) -> No
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _registry, _client, _started_at, _background_task_healthy
+    global _registry, _client, _gpu_metrics, _started_at, _background_task_healthy
 
     # Fail fast if NO VRAM budget is configured.  A wrong/zero VRAM budget would
     # silently mis-budget every eviction decision, so refuse to start instead of
@@ -203,6 +294,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     task = asyncio.create_task(_expiry_task(_registry, _client))
 
+    # Soft reconciliation: poll nvidia-smi to compare measured VRAM against the
+    # declared accounting. Degrades to a no-op (empty reconciliation) if nvidia-smi
+    # is unavailable; start() never raises. Stored on app.state for testability.
+    _gpu_metrics = GpuMetricsCollector(
+        poll_interval_seconds=settings.gpu_poll_seconds,
+        on_sample=_log_reconciliation_warnings,
+    )
+    app.state.gpu_metrics = _gpu_metrics
+    await _gpu_metrics.start()
+
     log.info("gpu-supervisor ready.")
 
     try:
@@ -213,6 +314,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await task
         except asyncio.CancelledError:
             pass
+        if _gpu_metrics is not None:
+            await _gpu_metrics.stop()
         log.info("gpu-supervisor shutdown complete.")
 
 
@@ -736,12 +839,18 @@ async def status() -> SupervisorStatus:
         for e in entries
     ]
 
+    # Soft reconciliation: latest nvidia-smi sample vs declared accounting.
+    # Empty (sampled_at None) when nvidia-smi is unavailable or before first poll.
+    metrics = _gpu_metrics.latest() if _gpu_metrics is not None else {}
+    reconciliation = _build_reconciliation(metrics, entries)
+
     return SupervisorStatus(
         services=services,
         total_vram_gb=round(total_budget, 3),
         used_vram_gb=round(used_gb, 3),
         available_vram_gb=round(total_budget - used_gb, 3),
         per_device=per_device,
+        reconciliation=reconciliation,
         started_at=_started_at or _utcnow(),
         last_eviction=_last_eviction,
         eviction_count=_eviction_count,

@@ -103,6 +103,41 @@ class PerDeviceVRAM(BaseModel):
     available_vram_gb: float
 
 
+class DeviceReconciliation(BaseModel):
+    """Measured-vs-declared VRAM comparison for one physical GPU.
+
+    Why: Surfaces drift between nvidia-smi's measured usage and the supervisor's
+    declared accounting so a leaked CUDA context (actual >> declared) is visible
+    in /status, not just buried in logs.
+    What: actual_used_mb (from nvidia-smi), declared_sum_mb (sum of loaded-service
+    footprints on this device), delta_mb = actual - declared, and a status of
+    "ok" or "leak_suspected" (delta_mb > leak_threshold_mb).
+    Test: For actual=2870, declared=2867, threshold=500 assert status=="ok" and
+    delta_mb==3; for actual=4000, declared=2867 assert status=="leak_suspected".
+    """
+
+    actual_used_mb: int
+    declared_sum_mb: int
+    delta_mb: int
+    status: str  # "ok" | "leak_suspected"
+
+
+class Reconciliation(BaseModel):
+    """Soft-reconciliation block for the /status response.
+
+    Why: Bundles the per-device comparison plus a human-readable warning list so
+    a single field tells monitoring whether measured VRAM agrees with accounting.
+    What: sampled_at is the nvidia-smi sample time (None if no sample yet);
+    devices maps device_id → DeviceReconciliation; warnings lists leak messages.
+    Test: With no nvidia-smi sample assert sampled_at is None and devices == {};
+    with a leak present assert warnings is non-empty.
+    """
+
+    sampled_at: Optional[datetime] = None
+    devices: dict[str, DeviceReconciliation] = {}
+    warnings: list[str] = []
+
+
 class SupervisorStatus(BaseModel):
     services: list[ServiceStatus]
     total_vram_gb: float
@@ -112,6 +147,10 @@ class SupervisorStatus(BaseModel):
     # registered. Authoritative for multi-GPU availability; the aggregate fields
     # above are sums and may not reflect per-device headroom.
     per_device: dict[str, PerDeviceVRAM]
+    # Soft reconciliation: nvidia-smi measured usage vs declared accounting.
+    # Empty (sampled_at None, no devices) when nvidia-smi is unavailable or no
+    # sample has completed yet.
+    reconciliation: Reconciliation
     started_at: datetime
     last_eviction: Optional[datetime]
     eviction_count: int

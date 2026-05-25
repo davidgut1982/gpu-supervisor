@@ -4,7 +4,12 @@ services:
     image: gpu-supervisor:latest
     container_name: gpu-supervisor
 
-    # CPU-only service: the supervisor never touches the GPU directly.
+    # The supervisor runs no CUDA/compute itself — it only needs nvidia-smi to
+    # measure actual per-device VRAM for soft reconciliation. NVIDIA_DRIVER_
+    # CAPABILITIES=utility grants exactly that (nvidia-smi/NVML) and nothing more,
+    # so no compute libraries are exposed.
+    runtime: nvidia
+
     cpus: 2.0
 
     # Memory: in-memory registry + httpx pools fits comfortably in 512 MB.
@@ -14,6 +19,10 @@ services:
       - "8202:8202"
 
     environment:
+      # GPU access for nvidia-smi only (soft reconciliation). "utility" capability
+      # is nvidia-smi/NVML without compute; "all" devices so every GPU is visible.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
       # REQUIRED (single-GPU): set this to your GPU's usable VRAM in GB
       # (e.g. RTX 3060 ~ 11.6). The supervisor refuses to start unless at least
       # one of TOTAL_VRAM_GB / GPU0_VRAM_GB / GPU1_VRAM_GB is > 0.

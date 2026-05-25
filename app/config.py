@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     # ── Background task interval ─────────────────────────────────────────────
     expiry_check_interval_seconds: int = 30
 
+    # ── Soft reconciliation (nvidia-smi polling) ──────────────────────────────
+    # How often to sample actual per-device VRAM with nvidia-smi to compare
+    # against the supervisor's declared accounting. Env var: GPU_POLL_SECONDS.
+    gpu_poll_seconds: int = 300
+    # A device whose measured VRAM exceeds its declared sum by more than this
+    # many MB is flagged "leak_suspected" in /status and logged at WARNING —
+    # the likely cause is a leaked CUDA context the supervisor isn't accounting
+    # for. Env var: LEAK_THRESHOLD_MB.
+    leak_threshold_mb: int = 500
+
     # ── Tier 3 yield policy ───────────────────────────────────────────────────
     # Seconds to suggest as Retry-After when a Tier 3 claim is deferred because
     # a higher-priority service (Tier 1 or 2) is actively in use.
